@@ -99,11 +99,22 @@ RUN test -f /comfyui/custom_nodes/ComfyUI-PuLID-Flux-Enhanced/__init__.py \
 #     This step actually loads each node's __init__.py the same way
 #     ComfyUI does (importlib + spec_from_file_location) so a broken
 #     import fails the BUILD with the traceback visible in CI logs.
-#     `/comfyui` on sys.path is needed for the `comfy.*` and
-#     `folder_paths` imports inside the node code.
+#
+#     CI runners have no NVIDIA driver, but ComfyUI's
+#     `comfy.model_management` probes the GPU at MODULE LOAD via
+#     `torch.cuda.current_device()`, which raises `RuntimeError: Found
+#     no NVIDIA driver` and would mask the real custom-node import
+#     errors. Setting `sys.argv = [..., '--cpu']` BEFORE the first
+#     comfy import makes `comfy.cli_args` parse `--cpu`, which makes
+#     `model_management` set `CPUState.CPU` at module load, which
+#     bypasses the cuda probe entirely. Real workers have a GPU and
+#     parse their own (non-`--cpu`) argv — so this hack is build-only.
 RUN python3 - <<'PY'
-import importlib.util, sys, traceback
+import sys
+sys.argv = ['comfy-build-importability-check', '--cpu']
 sys.path.insert(0, "/comfyui")
+
+import importlib.util, traceback
 errors = []
 for name, path in [
     ("PuLID_Flux_Enhanced", "/comfyui/custom_nodes/ComfyUI-PuLID-Flux-Enhanced/__init__.py"),
