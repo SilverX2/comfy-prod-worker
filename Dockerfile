@@ -52,3 +52,29 @@ RUN python3 -c "import insightface, onnxruntime, facexlib, timm, ftfy, ultralyti
 RUN test -f /comfyui/custom_nodes/ComfyUI-PuLID-Flux-Enhanced/__init__.py \
     && test -f /comfyui/custom_nodes/ComfyUI_IPAdapter_plus/__init__.py \
     && echo "custom node clone verified"
+
+# 5. Bake extra_model_paths.yaml so the worker can find models on the
+#    network volume. The base image's COMFY_HOME env var isn't honored,
+#    so we override the yaml at /comfyui/extra_model_paths.yaml directly.
+#    Our volume layout is `/runpod-volume/ComfyUI/models/<type>` (the
+#    ComfyGen-style layout we re-laid the volume to earlier).
+RUN cat > /comfyui/extra_model_paths.yaml <<'EOF'
+# Tells ComfyUI where to find models on the RunPod network volume.
+# Overridden in our image to match the volume's ComfyGen-style layout.
+runpod_volume:
+    base_path: /runpod-volume/ComfyUI/models
+    checkpoints: checkpoints
+    unet: unet
+    diffusion_models: diffusion_models
+    clip: clip
+    clip_vision: clip_vision
+    text_encoders: text_encoders
+    vae: vae
+    loras: loras
+    controlnet: controlnet
+    ipadapter: ipadapter
+    pulid: pulid
+    upscale_models: upscale_models
+    embeddings: embeddings
+    style_models: style_models
+EOF
