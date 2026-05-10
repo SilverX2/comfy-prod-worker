@@ -91,6 +91,41 @@ RUN test -f /comfyui/custom_nodes/ComfyUI-PuLID-Flux-Enhanced/__init__.py \
     && test -f /comfyui/custom_nodes/ComfyUI-ReActor/__init__.py \
     && echo "custom node clone verified"
 
+# 4b. Importability check — the v3 build shipped with Reactor's __init__.py
+#     present but its import raised, so ComfyUI silently skipped it and
+#     `ReActorFaceSwap` never registered. The job got back a runtime
+#     `node does not exist` error and we had no signal from the build.
+#
+#     This step actually loads each node's __init__.py the same way
+#     ComfyUI does (importlib + spec_from_file_location) so a broken
+#     import fails the BUILD with the traceback visible in CI logs.
+#     `/comfyui` on sys.path is needed for the `comfy.*` and
+#     `folder_paths` imports inside the node code.
+RUN python3 - <<'PY'
+import importlib.util, sys, traceback
+sys.path.insert(0, "/comfyui")
+errors = []
+for name, path in [
+    ("PuLID_Flux_Enhanced", "/comfyui/custom_nodes/ComfyUI-PuLID-Flux-Enhanced/__init__.py"),
+    ("IPAdapter_plus",     "/comfyui/custom_nodes/ComfyUI_IPAdapter_plus/__init__.py"),
+    ("InstantID",          "/comfyui/custom_nodes/ComfyUI_InstantID/__init__.py"),
+    ("ReActor",            "/comfyui/custom_nodes/ComfyUI-ReActor/__init__.py"),
+]:
+    try:
+        spec = importlib.util.spec_from_file_location(name, path)
+        m = importlib.util.module_from_spec(spec)
+        sys.modules[name] = m
+        spec.loader.exec_module(m)
+        print(f"  IMPORT OK:     {name}")
+    except Exception as e:
+        print(f"  IMPORT FAILED: {name}: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        errors.append(name)
+if errors:
+    print(f"\nFAILED IMPORTS: {errors}")
+    sys.exit(1)
+PY
+
 # 5. Bake extra_model_paths.yaml so the worker can find models on the
 #    network volume. The base image's COMFY_HOME env var isn't honored,
 #    so we override the yaml at /comfyui/extra_model_paths.yaml directly.
