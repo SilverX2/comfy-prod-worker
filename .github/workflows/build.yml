@@ -38,7 +38,7 @@ jobs:
           file: Dockerfile
           push: true
           tags: |
-            ghcr.io/${{ github.repository_owner }}/comfy-prod-worker:${{ github.event.inputs.tag || 'v1' }}
-            ghcr.io/${{ github.repository_owner }}/comfy-prod-worker:latest
+            ghcr.io/silverx2/comfy-prod-worker:${{ github.event.inputs.tag || 'v1' }}
+            ghcr.io/silverx2/comfy-prod-worker:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
