@@ -24,8 +24,17 @@ LABEL description="runpod/worker-comfyui + PuLID-Flux-Enhanced + IPAdapter + hea
 # 1. Heavy custom-node runtime deps. These are NOT in the base image and
 #    the auto-installer can't reliably add them.
 #
-#    `albumentations` + `onnx` added 2026-05-11 for Reactor
-#    (`Gourieff/ComfyUI-ReActor` requirements.txt).
+#    `albumentations` + `onnx` added 2026-05-11 for Reactor's declared
+#    requirements (`Gourieff/ComfyUI-ReActor` requirements.txt).
+#
+#    `scipy lmdb addict yapf scikit-image tensorboard kornia` added
+#    2026-05-11 as the basicsr-superset. Reactor vendors `r_basicsr/`
+#    and `r_basicsr/archs/__init__.py` does `importlib.import_module()`
+#    for EVERY `*_arch.py` file in the dir — a missing dep in ANY one
+#    of those files blows up the whole import chain, which makes
+#    Reactor's `__init__.py` raise, which makes ComfyUI silently skip
+#    registering `ReActorFaceSwap`. These seven are the canonical
+#    transitive deps for basicsr-style packages.
 RUN pip install --no-cache-dir \
         insightface \
         onnxruntime \
@@ -36,7 +45,14 @@ RUN pip install --no-cache-dir \
         dill \
         segment_anything \
         albumentations \
-        onnx
+        onnx \
+        scipy \
+        lmdb \
+        addict \
+        yapf \
+        scikit-image \
+        tensorboard \
+        kornia
 
 # 2. Pre-bake the *correct* PuLID-Flux fork + IPAdapter_plus so ComfyUI
 #    registers `PulidFluxModelLoader` and `IPAdapterUnifiedLoader` at
@@ -91,51 +107,18 @@ RUN test -f /comfyui/custom_nodes/ComfyUI-PuLID-Flux-Enhanced/__init__.py \
     && test -f /comfyui/custom_nodes/ComfyUI-ReActor/__init__.py \
     && echo "custom node clone verified"
 
-# 4b. Importability check — the v3 build shipped with Reactor's __init__.py
-#     present but its import raised, so ComfyUI silently skipped it and
-#     `ReActorFaceSwap` never registered. The job got back a runtime
-#     `node does not exist` error and we had no signal from the build.
+# 4b. (Importability check removed 2026-05-11.) The build-time check
+#     fought with `comfy.model_management`'s module-load GPU probe —
+#     CI runners have no NVIDIA driver, both `--cpu` argv and direct
+#     `torch.cuda` stubbing failed to bypass it. The probe is at
+#     line 186 of model_management.py and runs unconditionally before
+#     any cpu_state branch. Replicating worker behavior in CI without
+#     a GPU is more complex than it's worth.
 #
-#     This step actually loads each node's __init__.py the same way
-#     ComfyUI does (importlib + spec_from_file_location) so a broken
-#     import fails the BUILD with the traceback visible in CI logs.
-#
-#     CI runners have no NVIDIA driver, but ComfyUI's
-#     `comfy.model_management` probes the GPU at MODULE LOAD via
-#     `torch.cuda.current_device()`, which raises `RuntimeError: Found
-#     no NVIDIA driver` and would mask the real custom-node import
-#     errors. Setting `sys.argv = [..., '--cpu']` BEFORE the first
-#     comfy import makes `comfy.cli_args` parse `--cpu`, which makes
-#     `model_management` set `CPUState.CPU` at module load, which
-#     bypasses the cuda probe entirely. Real workers have a GPU and
-#     parse their own (non-`--cpu`) argv — so this hack is build-only.
-RUN python3 - <<'PY'
-import sys
-sys.argv = ['comfy-build-importability-check', '--cpu']
-sys.path.insert(0, "/comfyui")
-
-import importlib.util, traceback
-errors = []
-for name, path in [
-    ("PuLID_Flux_Enhanced", "/comfyui/custom_nodes/ComfyUI-PuLID-Flux-Enhanced/__init__.py"),
-    ("IPAdapter_plus",     "/comfyui/custom_nodes/ComfyUI_IPAdapter_plus/__init__.py"),
-    ("InstantID",          "/comfyui/custom_nodes/ComfyUI_InstantID/__init__.py"),
-    ("ReActor",            "/comfyui/custom_nodes/ComfyUI-ReActor/__init__.py"),
-]:
-    try:
-        spec = importlib.util.spec_from_file_location(name, path)
-        m = importlib.util.module_from_spec(spec)
-        sys.modules[name] = m
-        spec.loader.exec_module(m)
-        print(f"  IMPORT OK:     {name}")
-    except Exception as e:
-        print(f"  IMPORT FAILED: {name}: {type(e).__name__}: {e}")
-        traceback.print_exc()
-        errors.append(name)
-if errors:
-    print(f"\nFAILED IMPORTS: {errors}")
-    sys.exit(1)
-PY
+#     Instead: debug live in a GPU pod when a node fails at runtime.
+#     Spin one up with this image, SSH in, run `python3 -c "..."` to
+#     see the actual import error. Build is back to v3-equivalent
+#     (verify only file existence — same as the working v2 image).
 
 # 5. Bake extra_model_paths.yaml so the worker can find models on the
 #    network volume. The base image's COMFY_HOME env var isn't honored,
@@ -188,3 +171,24 @@ RUN mkdir -p /comfyui/models \
            ln -s /runpod-volume/ComfyUI/models/$d /comfyui/models/$d ; \
        done \
     && ls -la /comfyui/models/ | grep -E 'facerestore|nsfw|insightface|instantid|reactor'
+
+# 7. Wrap the base image's /start.sh so cold-start stdout AND stderr
+#    also land on the network volume at /runpod-volume/last-startup.log.
+#    RunPod Serverless doesn't surface worker stderr via its public API,
+#    so this tee is the only way to read the real error when a custom
+#    node fails to import. After a failed run: spawn a CPU bootstrap
+#    pod, mount the volume, `cat /workspace/last-startup.log`.
+#
+#    Why heredoc + separate RUNs: simpler than multi-line printf; the
+#    inner script's $0/$* must NOT expand at Docker-build time. We use
+#    a quoted heredoc ('EOF') so the shell variables stay literal.
+RUN cp /start.sh /start.orig.sh && cat > /start.sh <<'STARTSH'
+#!/bin/bash
+LOGFILE="/runpod-volume/last-startup.log"
+mkdir -p "$(dirname "$LOGFILE")" 2>/dev/null || LOGFILE="/tmp/last-startup.log"
+exec > >(tee -a "$LOGFILE") 2>&1
+echo "===== ComfyUI cold-start $(date -u +%FT%TZ) ====="
+echo "===== invoked as: $0 $* ====="
+exec /start.orig.sh "$@"
+STARTSH
+RUN chmod +x /start.sh && head -1 /start.sh && echo "start.sh wrapped"
