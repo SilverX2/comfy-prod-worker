@@ -165,12 +165,21 @@ EOF
 #    that's fine; symlinks resolve at access time when the volume is up.
 #    Yaml entries above stay for well-behaved nodes; symlinks are the
 #    belt-and-suspenders fallback for ones that bypass yaml.
+#
+#    DO NOT include `reactor` in this list (verified 2026-05-11 from a
+#    captured cold-start stderr log). Reactor's nodes.py line 76 calls
+#    `os.makedirs(REACTOR_MODELS_PATH)` (== /comfyui/models/reactor)
+#    WITHOUT exist_ok=True for its own ephemeral scratch dir. If the
+#    path already exists (because we symlinked it), the import raises
+#    FileExistsError and ComfyUI silently skips ReActorFaceSwap. The
+#    dir is per-worker working state, not a shared model path — let
+#    Reactor create it fresh in the container's writable layer.
 RUN mkdir -p /comfyui/models \
-    && for d in facerestore_models nsfw_detector insightface instantid reactor; do \
+    && for d in facerestore_models nsfw_detector insightface instantid; do \
            rm -rf /comfyui/models/$d ; \
            ln -s /runpod-volume/ComfyUI/models/$d /comfyui/models/$d ; \
        done \
-    && ls -la /comfyui/models/ | grep -E 'facerestore|nsfw|insightface|instantid|reactor'
+    && ls -la /comfyui/models/ | grep -E 'facerestore|nsfw|insightface|instantid'
 
 # 7. Wrap the base image's /start.sh so cold-start stdout AND stderr
 #    also land on the network volume at /runpod-volume/last-startup.log.
